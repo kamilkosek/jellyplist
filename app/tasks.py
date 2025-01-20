@@ -384,8 +384,19 @@ def check_for_playlist_updates(self):
                             .order_by(playlist_tracks.c.track_order)
                         ).all()
 
-                        tracks = [track.jellyfin_id for track, idx in ordered_tracks if track.jellyfin_id is not None]
-                        jellyfin.add_songs_to_playlist(session_token=jellyfin_admin_token, user_id=jellyfin_admin_id, playlist_id=playlist.jellyfin_id, song_ids=tracks)
+                        tracks = []
+                        size = 0
+                        for track, idx in ordered_tracks:
+                            if track.jellyfin_id is not None:
+                                tracks.append(track.jellyfin_id)
+                                size = size + 1
+                            if size >= 100:
+                                jellyfin.add_songs_to_playlist(session_token=jellyfin_admin_token, user_id=jellyfin_admin_id, playlist_id=playlist.jellyfin_id, song_ids=tracks)
+                                tracks = []
+                                size = 0
+                        if size > 0:
+                            jellyfin.add_songs_to_playlist(session_token=jellyfin_admin_token, user_id=jellyfin_admin_id, playlist_id=playlist.jellyfin_id, song_ids=tracks)
+
                         #endregion
                     except Exception as e:
                         app.logger.error(f"Error updating playlist {playlist.name}: {str(e)}")
