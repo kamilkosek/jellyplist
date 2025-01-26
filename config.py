@@ -22,7 +22,7 @@ class Config:
     DISPLAY_EXTENDED_AUDIO_DATA = os.getenv('DISPLAY_EXTENDED_AUDIO_DATA',"false").lower() == 'true' 
     CACHE_TYPE = 'redis'
     CACHE_REDIS_PORT = 6379
-    CACHE_REDIS_HOST = 'redis'
+    CACHE_REDIS_HOST = os.getenv('CACHE_REDIS_HOST','redis')
     CACHE_REDIS_DB = 0
     CACHE_DEFAULT_TIMEOUT = 3600
     REDIS_URL = os.getenv('REDIS_URL','redis://redis:6379/0')
