@@ -1,5 +1,10 @@
 ![Jellyplist Logo](./static/images/logo_large.png)
 
+> [!CAUTION]
+> Since spotify disabled crucial features last year from their API and my workarounds are also not working anymore I decided to archive this project and not invest any effor to make it work again. 
+> Searching for alternatives?  Use [Spotizerr](https://lavaforge.org/spotizerr/spotizerr), it works well and maintains m3u´s which are getting picked up by Jellyfin. 
+> To make it work with editorial lists and not copy pasting ID´s you can use this Firefox Addon [Spotizer Helper](https://addons.mozilla.org/de/firefox/addon/spotizerr-helper/)
+<del>
 > [!WARNING]  
 > Jellyplist is still at a very early stage: expect Bugs and weird behaviour. Especially the UI and UX are a bit clunky and unresponsive
 
@@ -177,3 +182,4 @@ For now the schedules aren´t configurable, but this is subject to change.
 Then let Jellyplist do it´s work, after some time you should be able to see the playlist in Jellyfin. 
 
 Have Fun ✌🏽
+</del>
