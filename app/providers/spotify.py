@@ -1,7 +1,6 @@
-from dataclasses import dataclass
 import os
 from app.providers.base import AccountAttributes, Album, Artist, BrowseCard, BrowseSection, Image, MusicProviderClient, Owner, Playlist, PlaylistTrack, Profile, Track, ExternalUrl, Category
-import requests
+import base64
 
 import json
 import requests
@@ -11,7 +10,37 @@ from typing import List, Dict, Optional
 from http.cookiejar import MozillaCookieJar
 import logging
 
+from typing import Callable, Tuple
+import hmac
+import time
+import hashlib
+
 l = logging.getLogger(__name__)
+
+_TOTP_SECRET = bytearray([53,53,48,55,49,52,53,56,53,51,52,56,55,52,57,57,53,57,50,50,52,56,54,51,48,51,50,57,51,52,55])
+
+def generate_totp(
+    secret: bytes = _TOTP_SECRET,
+    algorithm: Callable[[], object] = hashlib.sha1,
+    digits: int = 6,
+    counter_factory: Callable[[], int] = lambda: int(time.time()) // 30,
+) -> Tuple[str, int]:
+    counter = counter_factory()
+    hmac_result = hmac.new(
+        secret, counter.to_bytes(8, byteorder="big"), algorithm  # type: ignore
+    ).digest()
+
+    offset = hmac_result[-1] & 15
+    truncated_value = (
+        (hmac_result[offset] & 127) << 24
+        | (hmac_result[offset + 1] & 255) << 16
+        | (hmac_result[offset + 2] & 255) << 8
+        | (hmac_result[offset + 3] & 255)
+    )
+    return (
+        str(truncated_value % (10**digits)).zfill(digits),
+        counter * 30_000,
+    )  # (30 * 1000)
 
 class SpotifyClient(MusicProviderClient):
     """
@@ -23,9 +52,10 @@ class SpotifyClient(MusicProviderClient):
     
     def __init__(self, cookie_file: Optional[str] = None):
         self.base_url = "https://api-partner.spotify.com"
-        self.session_data = None
-        self.config_data = None
+        self.app_server_config_data = None
         self.client_token = None
+        self.access_token = None
+        self.client_id = None
         self.cookies = None
         if cookie_file:
             self._load_cookies(cookie_file)
@@ -52,16 +82,19 @@ class SpotifyClient(MusicProviderClient):
         """
         if self.cookies:
             l.debug("Authenticating using cookies.")
-            self.session_data, self.config_data = self._fetch_session_data()
-            self.client_token = self._fetch_client_token()
+            self.app_server_config_data = self._fetch_app_server_config_data()
         else:
             l.debug("Authenticating without cookies.")
-            self.session_data, self.config_data = self._fetch_session_data(fetch_with_cookies=False)
-            self.client_token = self._fetch_client_token()
+            self.app_server_config_data = self._fetch_app_server_config_data(fetch_with_cookies=False)
 
-    def _fetch_session_data(self, fetch_with_cookies: bool = True):
+        self._get_access_token_and_client_id()
+        self.client_token = self._fetch_client_token()
+
+    def _fetch_app_server_config_data(self, fetch_with_cookies: bool = True):
         """
-        Fetch session data from Spotify.
+        Fetch app_server_config data from Spotify.
+
+        We will use the correlationId from app_server_config_data for a successful _fetch_client_token call
 
         :param fetch_with_cookies: Whether to include cookies in the request.
         :return: Tuple containing session and config data.
@@ -75,13 +108,14 @@ class SpotifyClient(MusicProviderClient):
         response = requests.get(url, headers=headers, cookies=cookies)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
-        session_script = soup.find('script', {'id': 'session'})
-        config_script = soup.find('script', {'id': 'config'})
-        if session_script and config_script:
-            l.debug("fetched session and config scripts")
-            return json.loads(session_script.string), json.loads(config_script.string)
+        app_server_config_script = soup.find('script', {'id': 'appServerConfig'}).text # decode JWT to obtain correlation required for obtain Bearer Token
+        decoded_app_server_config_script = base64.b64decode(app_server_config_script) # base64 decode
+        decoded_app_server_config_script = decoded_app_server_config_script.decode().strip("b'") # decode from byte object to string object
+        if decoded_app_server_config_script:
+            l.debug("fetched app_server_config_script scripts")
+            return json.loads(decoded_app_server_config_script)
         else:
-            raise ValueError("Failed to fetch session or config data.")
+            raise ValueError("Failed to fetch app_server_config data.")
 
     def _fetch_client_token(self):
         """
@@ -99,21 +133,48 @@ class SpotifyClient(MusicProviderClient):
         payload = {
             "client_data": {
                 "client_version": "1.2.52.404.gcb99a997",
-                "client_id": self.session_data.get("clientId", ""),
+                "client_id": self.client_id,
                 "js_sdk_data": {
                     "device_brand": "unknown",
                     "device_model": "unknown",
                     "os": "windows",
                     "os_version": "NT 10.0",
-                    "device_id": self.config_data.get("correlationId", ""),
+                    "device_id": self.app_server_config_data.get("correlationId", ""),
                     "device_type": "computer"
                 }
             }
         }
         response = requests.post(url, headers=headers, json=payload, cookies=self.cookies)
         response.raise_for_status()
-        l.debug("fetched granted_token")
+        l.debug("fetched client_token (granted_token)")
         return response.json().get("granted_token", "")
+
+    def _get_access_token_and_client_id(self, fetch_with_cookies: bool = True):
+        """
+        Fetch the Access Token and Client ID by making GET call to open.spotify.com/get_access_token
+        """
+        url = f'https://open.spotify.com/get_access_token'
+        headers = {
+            'accept': 'application/json',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        }
+
+        totp, timestamp = generate_totp()
+
+        query_params = {
+            "reason": "init",
+            "productType": "web-player",
+            "totp": totp,
+            "totpVer": 5,
+            "ts": timestamp,
+        }
+        cookies = self.cookies if fetch_with_cookies else None
+
+        response = requests.get(url, params=query_params, headers=headers, cookies=self.cookies)
+        response.raise_for_status()
+        self.client_id = response.json().get("clientId", "")
+        self.access_token = response.json().get("accessToken", "")
+        l.debug("fetched access_token and client_id")
 
     def _make_request(self, endpoint: str, params: dict = None) -> dict:
         """
@@ -122,8 +183,8 @@ class SpotifyClient(MusicProviderClient):
         headers = {
             'accept': 'application/json',
             'app-platform': 'WebPlayer',
-            'authorization': f'Bearer {self.session_data.get("accessToken", "")}',
-            'client-token': self.client_token.get('token',''),
+            'authorization': f'Bearer {self.access_token}',
+            'client-token': self.client_token.get('token','')
         }
         l.debug(f"starting request: {self.base_url}/{endpoint}")
         response = requests.get(f"{self.base_url}/{endpoint}", headers=headers, params=params, cookies=self.cookies)
@@ -131,7 +192,7 @@ class SpotifyClient(MusicProviderClient):
         if response.status_code == 401:
             l.debug("reauthenticating")
             self.authenticate()
-            headers['authorization'] = f'Bearer {self.session_data.get("accessToken", "")}'
+            headers['authorization'] = f'Bearer {self.access_token}'
             headers['client-token'] = self.client_token.get('token','')
             response = requests.get(f"{self.base_url}/{endpoint}", headers=headers, params=params, cookies=self.cookies)
         

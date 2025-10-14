@@ -203,6 +203,7 @@ else:
     spotify_client = SpotifyClient()
     
 spotify_client.authenticate()
+app.logger.info('spotify auth successful')
 from .registry import MusicProviderRegistry
 MusicProviderRegistry.register_provider(spotify_client)
 
